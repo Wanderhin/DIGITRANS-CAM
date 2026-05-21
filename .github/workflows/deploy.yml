@@ -66,7 +66,7 @@ jobs:
           # Using outputs for secrets is generally discouraged, but for a 0-budget automated setup it works.
           # A better approach is using AWS Systems Manager, but SCP is simpler here.
           terraform output -raw private_key_pem > private_key.pem
-          
+
       - name: Upload Private Key Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -89,9 +89,16 @@ jobs:
           distribution: 'corretto'
           cache: 'maven'
 
-      - name: Build with Maven
+      - name: Run Tests & Build with Maven
         working-directory: ./crmBackend
-        run: mvn clean package -DskipTests
+        run: mvn clean package jacoco:report
+
+      - name: Upload JaCoCo Coverage Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-report
+          path: ./crmBackend/target/site/jacoco/
+          retention-days: 7
 
       - name: Download SSH Key
         uses: actions/download-artifact@v4
@@ -150,5 +157,7 @@ jobs:
         env:
           FRONTEND_BUCKET: ${{ needs.infrastructure.outputs.frontend_bucket }}
         run: |
+          # Rename index.csr.html to index.html for static S3 hosting (because outputMode=server is used in angular.json)
+          mv ./crmFrontend/dist/crmFrontend/browser/index.csr.html ./crmFrontend/dist/crmFrontend/browser/index.html || true
           # Sync the dist folder to the S3 bucket
           aws s3 sync ./crmFrontend/dist/crmFrontend/browser/ s3://$FRONTEND_BUCKET/ --delete
