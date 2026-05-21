@@ -1,0 +1,154 @@
+name: CI/CD Pipeline AWS (Terraform + App)
+
+on:
+  push:
+    branches:
+      - master
+
+env:
+  AWS_REGION: eu-north-1
+
+jobs:
+  infrastructure:
+    name: Provision Infrastructure (Terraform)
+    runs-on: ubuntu-latest
+    outputs:
+      ec2_ip: ${{ steps.tf-outputs.outputs.ec2_public_ip }}
+      frontend_bucket: ${{ steps.tf-outputs.outputs.frontend_bucket_name }}
+      private_key: ${{ steps.tf-outputs.outputs.private_key }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create Terraform State Bucket (if not exists)
+        run: |
+          BUCKET_NAME="digitrans-crm-tfstate-${{ github.repository_id }}"
+          echo "TF_STATE_BUCKET=$BUCKET_NAME" >> $GITHUB_ENV
+          if ! aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null; then
+            echo "Bucket does not exist. Creating..."
+            # eu-north-1 requires LocationConstraint
+            aws s3api create-bucket --bucket "$BUCKET_NAME" --region ${{ env.AWS_REGION }} --create-bucket-configuration LocationConstraint=${{ env.AWS_REGION }}
+          fi
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        working-directory: ./terraform
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
+            -backend-config="key=prod/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+
+      - name: Terraform Apply
+        working-directory: ./terraform
+        run: terraform apply -auto-approve
+
+      - name: Get Terraform Outputs
+        id: tf-outputs
+        working-directory: ./terraform
+        run: |
+          echo "ec2_public_ip=$(terraform output -raw ec2_public_ip)" >> $GITHUB_OUTPUT
+          # We need the exact bucket name for aws s3 sync, not the URL
+          BUCKET_URL=$(terraform output -raw frontend_bucket_url)
+          BUCKET_NAME=$(echo $BUCKET_URL | awk -F'.' '{print $1}')
+          echo "frontend_bucket_name=$BUCKET_NAME" >> $GITHUB_OUTPUT
+          
+          # We save the generated private key into a temporary file to pass it to the next jobs
+          # Using outputs for secrets is generally discouraged, but for a 0-budget automated setup it works.
+          # A better approach is using AWS Systems Manager, but SCP is simpler here.
+          terraform output -raw private_key_pem > private_key.pem
+          
+      - name: Upload Private Key Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-key
+          path: ./terraform/private_key.pem
+          retention-days: 1
+
+  deploy-backend:
+    name: Build & Deploy Spring Boot
+    needs: infrastructure
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'corretto'
+          cache: 'maven'
+
+      - name: Build with Maven
+        working-directory: ./crmBackend
+        run: mvn clean package -DskipTests
+
+      - name: Download SSH Key
+        uses: actions/download-artifact@v4
+        with:
+          name: ssh-key
+
+      - name: Configure SSH Key
+        run: |
+          chmod 600 private_key.pem
+
+      - name: Deploy to EC2
+        env:
+          EC2_IP: ${{ needs.infrastructure.outputs.ec2_ip }}
+        run: |
+          # Disable strict host key checking for the automated deployment
+          mkdir -p ~/.ssh
+          echo "StrictHostKeyChecking no" >> ~/.ssh/config
+          
+          # Copy the jar
+          scp -i private_key.pem ./crmBackend/target/*.jar ec2-user@$EC2_IP:/opt/app/crmBackend.jar
+          
+          # Restart the service
+          ssh -i private_key.pem ec2-user@$EC2_IP "sudo systemctl restart crm-backend"
+
+  deploy-frontend:
+    name: Build & Deploy Angular SPA
+    needs: infrastructure
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: './crmFrontend/package-lock.json'
+
+      - name: Install dependencies
+        working-directory: ./crmFrontend
+        run: npm ci
+
+      - name: Build Angular app
+        working-directory: ./crmFrontend
+        run: npm run build -- --configuration production
+
+      - name: Deploy to S3
+        env:
+          FRONTEND_BUCKET: ${{ needs.infrastructure.outputs.frontend_bucket }}
+        run: |
+          # Sync the dist folder to the S3 bucket
+          aws s3 sync ./crmFrontend/dist/crmFrontend/browser/ s3://$FRONTEND_BUCKET/ --delete
