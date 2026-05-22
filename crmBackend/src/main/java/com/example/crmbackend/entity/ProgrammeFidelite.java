@@ -48,3 +48,4 @@ public class ProgrammeFidelite {
 
     public enum NiveauFidelite { BRONZE, ARGENT, OR, PLATINE }
 }
+//
