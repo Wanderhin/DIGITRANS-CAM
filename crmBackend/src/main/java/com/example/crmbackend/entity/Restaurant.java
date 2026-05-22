@@ -27,3 +27,4 @@ public class Restaurant extends BaseEntity {
     @Column(nullable = false)
     private Boolean actif = true;
 }
+//
