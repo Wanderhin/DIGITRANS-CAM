@@ -32,3 +32,4 @@ public class Client extends BaseEntity {
     private Boolean actif = true;
     public enum Segment { VIP, REGULIER, OCCASIONNEL }
 }
+//
