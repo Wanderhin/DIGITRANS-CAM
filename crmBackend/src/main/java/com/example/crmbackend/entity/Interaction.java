@@ -34,3 +34,4 @@ public class Interaction extends BaseEntity {
 
     public enum TypeInteraction { APPEL, EMAIL, VISITE, RECLAMATION, SMS }
 }
+//

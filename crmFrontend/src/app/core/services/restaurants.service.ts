@@ -6,7 +6,7 @@ import { environment } from '../../../environments/environment';
 @Injectable({ providedIn: 'root' })
 export class RestaurantsService {
   private apiUrl = `${environment.apiUrl}/restaurants`;
-
+//
   constructor(private http: HttpClient) {}
 
   list(params: any): Observable<any> {
