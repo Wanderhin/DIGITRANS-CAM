@@ -12,7 +12,7 @@ services:
       - "3306:3306"
     volumes:
       - db_data:/var/lib/mysql
-      # Uncomment the next line and add init script if you want to initialize the DB automatically
+      #  the next line and add init script if you want to initialize the DB automatically
       # - ./init.sql:/docker-entrypoint-initdb.d/init.sql
 
   backend:
